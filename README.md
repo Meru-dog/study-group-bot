@@ -75,6 +75,15 @@ ADC 利用時は、対象スプレッドシートを実行サービスアカウ�
 
 この Bot は `/slack/events` でイベントを受信し、`message.channels` はスレッド投稿の `テーマ：...` 更新に利用します。
 
+## 手動テスト（#attendance で即時投稿）
+
+`#attendance` で次のテキストを投稿すると、定時を待たずに参加宣言投稿を 1 回実行できます。
+
+- `参加宣言投稿`
+
+ローカルで Slack 連携を確認する場合は、`python app.py` で起動したあと `ngrok` などで `https` 公開し、
+Slack Event Subscriptions の Request URL を `https://<公開URL>/slack/events` に設定してください。
+
 ## ローカル実行時の設定例
 
 起動前に必須環境変数を設定してください（`GOOGLE_SERVICE_ACCOUNT_JSON` は任意）。

@@ -24,6 +24,7 @@ ATTENDANCE_EMOJIS = {"white_check_mark": "対面", "computer": "オンライン"
 SPEAKER_EMOJI = "microphone"
 TOPIC_PREFIX = "テーマ："
 DATE_FORMAT = "%Y/%m/%d"
+MANUAL_DECLARATION_COMMAND = "参加宣言投稿"
 
 
 @dataclass
@@ -275,6 +276,7 @@ class StudyGroupBot:
 
         @self.app.event("message")
         def on_message(event, logger):
+            self._handle_manual_command(event)
             self._handle_thread_message(event)
             logger.info("processed message event")
 
@@ -309,6 +311,16 @@ class StudyGroupBot:
         speaker_ids = self.state.get_speakers(date_key)
         speaker_names = [self._display_name(uid) for uid in speaker_ids]
         self.repo.update_speaker_flags(date_key, speaker_names)
+
+    def _handle_manual_command(self, event: Dict):
+        if event.get("subtype") is not None:
+            return
+        if event.get("channel") != self.settings.slack_channel_id:
+            return
+        text = (event.get("text") or "").strip()
+        if text != MANUAL_DECLARATION_COMMAND:
+            return
+        self.post_declaration_message()
 
     def _handle_thread_message(self, event: Dict):
         if event.get("subtype") is not None:
