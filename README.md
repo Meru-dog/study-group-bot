@@ -64,6 +64,10 @@ ADC 利用時は、対象スプレッドシートを実行サービスアカウ�
 1. Slack App 設定の **Event Subscriptions** を ON にする
 2. **Request URL** に `https://<your-domain>/slack/events` を設定する
    - `<your-domain>` は「公開された実URLのドメイン」を入れます。
+   - `study-bot` のような任意文字列はURLとして解決できないため、Slackで `not a proper link` になります。
+   - 例: Cloud Run の場合 `https://<service>-<hash>-an.a.run.app/slack/events`
+   - 例: ローカル確認時は `https://<ngrok-subdomain>.ngrok-free.app/slack/events` のようなHTTPS公開URLを使います。
+   - URL 検証で `Verified` になる必要があります（`/slack/events` が外部から到達可能であること）。
 3. **Subscribe to bot events** に以下を追加する
    - `reaction_added`
    - `reaction_removed`
@@ -83,9 +87,6 @@ export MEET_URL='https://meet.google.com/...'
 export GOOGLE_SPREADSHEET_ID='...'
 python app.py
 ```
-
-未設定の必須環境変数がある場合、起動時に `Missing required environment variables: ...` エラーを表示します。
-
 
 ## 起動
 

@@ -178,13 +178,48 @@ class SheetRepository:
         return [r for r in self.ws.get_all_records() if r["日付"] == date_key]
 
 
+
+
+class NoopSheetRepository:
+    """Fallback repository used when Google credentials are unavailable."""
+
+    def upsert_attendance(self, date_key: str, participant: str, attendance: str):
+        logger.warning(
+            "Skipping upsert_attendance because Google Sheets is unavailable: %s, %s, %s",
+            date_key,
+            participant,
+            attendance,
+        )
+
+    def update_speaker_flags(self, date_key: str, speaker_names: List[str]):
+        logger.warning(
+            "Skipping update_speaker_flags because Google Sheets is unavailable: %s, %s",
+            date_key,
+            speaker_names,
+        )
+
+    def update_topic(self, date_key: str, participant: str, topic: str):
+        logger.warning(
+            "Skipping update_topic because Google Sheets is unavailable: %s, %s",
+            date_key,
+            participant,
+        )
+
+    def get_day_records(self, date_key: str) -> List[Dict[str, str]]:
+        logger.warning("Returning empty records because Google Sheets is unavailable: %s", date_key)
+        return []
+
 class StudyGroupBot:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.app = App(token=settings.slack_bot_token, signing_secret=settings.slack_signing_secret)
         self.handler = SlackRequestHandler(self.app)
         self.state = LocalState(settings.state_path)
-        self.repo = SheetRepository(settings)
+        try:
+            self.repo = SheetRepository(settings)
+        except RuntimeError as exc:
+            logger.error("Google Sheets disabled: %s", exc)
+            self.repo = NoopSheetRepository()
         self.user_name_cache: Dict[str, str] = {}
         self._register_handlers()
         self.scheduler = BackgroundScheduler(timezone="Asia/Tokyo")
