@@ -20,6 +20,7 @@ Slack 上のリアクションとスレッド返信を Google スプレッドシ
 - `SLACK_CHANNEL_ID` (`#attendance` のチャンネルID)
 - `MEET_URL` (固定 Meet URL)
 - `GOOGLE_SPREADSHEET_ID`
+
 - `GOOGLE_SERVICE_ACCOUNT_JSON` (任意。従来方式。サービスアカウント JSON を 1 行文字列で)
 - `STATE_PATH` (任意。デフォルト `./state.json`)
 - `PORT` (任意。デフォルト `3000`)
@@ -36,6 +37,11 @@ JSON キー作成が組織ポリシーで禁止されている場合は、`GOOGL
 実行環境のサービスアカウントに Sheets へのアクセス権を付与してください（鍵レス運用）。
 
 ADC 利用時は、対象スプレッドシートを実行サービスアカウントに共有（編集者）してください。
+
+=======
+- `GOOGLE_SERVICE_ACCOUNT_JSON` (サービスアカウント JSON を 1 行文字列で)
+- `STATE_PATH` (任意。デフォルト `./state.json`)
+- `PORT` (任意。デフォルト `3000`)
 
 ## Google スプレッドシート
 
