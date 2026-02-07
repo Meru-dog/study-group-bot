@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import threading
 from dataclasses import dataclass
 from datetime import datetime
@@ -222,6 +223,7 @@ class StudyGroupBot:
             logger.error("Google Sheets disabled: %s", exc)
             self.repo = NoopSheetRepository()
         self.user_name_cache: Dict[str, str] = {}
+        self.channel_name_cache: Dict[str, str] = {}
         self._register_handlers()
         self.scheduler = BackgroundScheduler(timezone="Asia/Tokyo")
         self._register_jobs()
@@ -280,6 +282,14 @@ class StudyGroupBot:
             self._handle_thread_message(event)
             logger.info("processed message event")
 
+        @self.app.message(re.compile(r"^\s*参加宣言投稿\s*$"))
+        def on_manual_declaration_message(message, say, logger):
+            if not self._is_manual_command_channel(message.get("channel")):
+                return
+            self.post_declaration_message()
+            say("参加宣言投稿を実行しました。")
+            logger.info("processed manual declaration message")
+
     def _is_target_message(self, date_key: str, channel: str, ts: str) -> bool:
         msg = self.state.get_declaration_message(date_key)
         return bool(msg and msg["channel"] == channel and msg["ts"] == ts)
@@ -312,12 +322,31 @@ class StudyGroupBot:
         speaker_names = [self._display_name(uid) for uid in speaker_ids]
         self.repo.update_speaker_flags(date_key, speaker_names)
 
+    def _is_manual_command_channel(self, event_channel: Optional[str]) -> bool:
+        if not event_channel:
+            return False
+        configured = self.settings.slack_channel_id.strip()
+        if configured.startswith(("C", "G")):
+            return event_channel == configured
+        if configured.startswith("#"):
+            if event_channel in self.channel_name_cache:
+                return f"#{self.channel_name_cache[event_channel]}" == configured
+            try:
+                info = self.app.client.conversations_info(channel=event_channel)
+                name = info.get("channel", {}).get("name")
+                if name:
+                    self.channel_name_cache[event_channel] = name
+                    return f"#{name}" == configured
+            except Exception:
+                return False
+        return False
+
     def _handle_manual_command(self, event: Dict):
         if event.get("subtype") is not None:
             return
-        if event.get("channel") != self.settings.slack_channel_id:
+        if not self._is_manual_command_channel(event.get("channel")):
             return
-        text = (event.get("text") or "").strip()
+        text = (event.get("text") or "").replace("　", " ").strip()
         if text != MANUAL_DECLARATION_COMMAND:
             return
         self.post_declaration_message()

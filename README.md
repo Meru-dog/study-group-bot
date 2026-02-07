@@ -17,7 +17,7 @@ Slack 上のリアクションとスレッド返信を Google スプレッドシ
 
 - `SLACK_BOT_TOKEN`
 - `SLACK_SIGNING_SECRET`
-- `SLACK_CHANNEL_ID` (`#attendance` のチャンネルID)
+- `SLACK_CHANNEL_ID`（`C...` 形式のチャンネルID推奨。`#attendance` のような名前指定も可）
 - `MEET_URL` (固定 Meet URL)
 - `GOOGLE_SPREADSHEET_ID`
 - `GOOGLE_SERVICE_ACCOUNT_JSON` (任意。従来方式。サービスアカウント JSON を 1 行文字列で)
@@ -80,6 +80,8 @@ ADC 利用時は、対象スプレッドシートを実行サービスアカウ�
 `#attendance` で次のテキストを投稿すると、定時を待たずに参加宣言投稿を 1 回実行できます。
 
 - `参加宣言投稿`
+
+`SLACK_CHANNEL_ID` が `#attendance` 形式でも、Bot がチャンネル名を解決して手動コマンドを判定します。
 
 ローカルで Slack 連携を確認する場合は、`python app.py` で起動したあと `ngrok` などで `https` 公開し、
 Slack Event Subscriptions の Request URL を `https://<公開URL>/slack/events` に設定してください。
