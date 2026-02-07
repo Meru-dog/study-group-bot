@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import gspread
+import google.auth
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask, Response, request
 from slack_bolt import App
@@ -31,18 +32,33 @@ class Settings:
     slack_channel_id: str
     meet_url: str
     google_spreadsheet_id: str
-    google_service_account_json: str
+    google_service_account_json: Optional[str]
     state_path: Path
 
     @staticmethod
     def from_env() -> "Settings":
+        required_keys = [
+            "SLACK_BOT_TOKEN",
+            "SLACK_SIGNING_SECRET",
+            "SLACK_CHANNEL_ID",
+            "MEET_URL",
+            "GOOGLE_SPREADSHEET_ID",
+        ]
+        missing = [key for key in required_keys if not os.environ.get(key)]
+        if missing:
+            joined = ", ".join(missing)
+            raise RuntimeError(
+                "Missing required environment variables: "
+                f"{joined}. Please set them before starting the app."
+            )
+
         return Settings(
             slack_bot_token=os.environ["SLACK_BOT_TOKEN"],
             slack_signing_secret=os.environ["SLACK_SIGNING_SECRET"],
             slack_channel_id=os.environ["SLACK_CHANNEL_ID"],
             meet_url=os.environ["MEET_URL"],
             google_spreadsheet_id=os.environ["GOOGLE_SPREADSHEET_ID"],
-            google_service_account_json=os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"],
+            google_service_account_json=os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON"),
             state_path=Path(os.environ.get("STATE_PATH", "./state.json")),
         )
 
@@ -92,10 +108,20 @@ class LocalState:
 
 class SheetRepository:
     HEADERS = ["日付", "参加者", "対面/オンライン", "発表の有無", "発表テーマ"]
+    SHEETS_SCOPES = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
 
     def __init__(self, settings: Settings):
-        creds = json.loads(settings.google_service_account_json)
-        gc = gspread.service_account_from_dict(creds)
+        if settings.google_service_account_json:
+            creds = json.loads(settings.google_service_account_json)
+            gc = gspread.service_account_from_dict(creds)
+            logger.info("Using GOOGLE_SERVICE_ACCOUNT_JSON for Google Sheets authentication")
+        else:
+            credentials, _ = google.auth.default(scopes=self.SHEETS_SCOPES)
+            gc = gspread.authorize(credentials)
+            logger.info("Using Application Default Credentials for Google Sheets authentication")
         self.sheet = gc.open_by_key(settings.google_spreadsheet_id)
         try:
             self.ws = self.sheet.worksheet("出席管理")
