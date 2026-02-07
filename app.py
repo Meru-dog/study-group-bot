@@ -223,7 +223,7 @@ class StudyGroupBot:
             logger.error("Google Sheets disabled: %s", exc)
             self.repo = NoopSheetRepository()
         self.user_name_cache: Dict[str, str] = {}
-        self.channel_name_cache: Dict[str, str] = {}
+        self.target_channel_id = settings.slack_channel_id.strip()
         self._register_handlers()
         self.scheduler = BackgroundScheduler(timezone="Asia/Tokyo")
         self._register_jobs()
@@ -261,8 +261,8 @@ class StudyGroupBot:
             "発表者はスレッドに `テーマ：〇〇` と返信してください（後で変更OK）\n"
             f"Meet：{self.settings.meet_url}"
         )
-        resp = self.app.client.chat_postMessage(channel=self.settings.slack_channel_id, text=text)
-        self.state.set_declaration_message(date_key, self.settings.slack_channel_id, resp["ts"])
+        resp = self.app.client.chat_postMessage(channel=self.target_channel_id, text=text)
+        self.state.set_declaration_message(date_key, self.target_channel_id, resp["ts"])
         logger.info("Declaration message posted for %s", date_key)
 
     def _register_handlers(self):
@@ -281,6 +281,7 @@ class StudyGroupBot:
             self._handle_manual_command(event)
             self._handle_thread_message(event)
             logger.info("processed message event")
+
 
         @self.app.message(re.compile(r"^\s*参加宣言投稿\s*$"))
         def on_manual_declaration_message(message, say, logger):
@@ -323,23 +324,7 @@ class StudyGroupBot:
         self.repo.update_speaker_flags(date_key, speaker_names)
 
     def _is_manual_command_channel(self, event_channel: Optional[str]) -> bool:
-        if not event_channel:
-            return False
-        configured = self.settings.slack_channel_id.strip()
-        if configured.startswith(("C", "G")):
-            return event_channel == configured
-        if configured.startswith("#"):
-            if event_channel in self.channel_name_cache:
-                return f"#{self.channel_name_cache[event_channel]}" == configured
-            try:
-                info = self.app.client.conversations_info(channel=event_channel)
-                name = info.get("channel", {}).get("name")
-                if name:
-                    self.channel_name_cache[event_channel] = name
-                    return f"#{name}" == configured
-            except Exception:
-                return False
-        return False
+        return bool(event_channel and event_channel == self.target_channel_id)
 
     def _handle_manual_command(self, event: Dict):
         if event.get("subtype") is not None:
@@ -399,7 +384,7 @@ class StudyGroupBot:
             f"{chr(10).join(speaker_lines) if speaker_lines else '- なし'}\n"
             f"Meet: {self.settings.meet_url}"
         )
-        self.app.client.chat_postMessage(channel=self.settings.slack_channel_id, text=text)
+        self.app.client.chat_postMessage(channel=self.target_channel_id, text=text)
 
     def post_start_message(self):
         date_key = self._today()
@@ -414,7 +399,7 @@ class StudyGroupBot:
             "本日の発表者:\n"
             f"{chr(10).join(speaker_lines) if speaker_lines else '- なし'}"
         )
-        self.app.client.chat_postMessage(channel=self.settings.slack_channel_id, text=text)
+        self.app.client.chat_postMessage(channel=self.target_channel_id, text=text)
 
 
 def create_flask_app() -> Flask:
