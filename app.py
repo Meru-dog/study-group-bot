@@ -334,11 +334,26 @@ class StudyGroupBot:
 
 
 def create_flask_app() -> Flask:
-    settings = Settings.from_env()
+    app = Flask(__name__)
+
+    try:
+        settings = Settings.from_env()
+    except RuntimeError as exc:
+        error_message = str(exc)
+        logger.error(error_message)
+
+        @app.route("/slack/events", methods=["POST"])
+        def slack_events_unavailable() -> Response:
+            return Response(error_message, status=503)
+
+        @app.route("/healthz", methods=["GET"])
+        def healthz_unavailable() -> Response:
+            return Response(error_message, status=500)
+
+        return app
+
     bot = StudyGroupBot(settings)
     bot.start()
-
-    app = Flask(__name__)
 
     @app.route("/slack/events", methods=["POST"])
     def slack_events() -> Response:

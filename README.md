@@ -20,7 +20,6 @@ Slack 上のリアクションとスレッド返信を Google スプレッドシ
 - `SLACK_CHANNEL_ID` (`#attendance` のチャンネルID)
 - `MEET_URL` (固定 Meet URL)
 - `GOOGLE_SPREADSHEET_ID`
-
 - `GOOGLE_SERVICE_ACCOUNT_JSON` (任意。従来方式。サービスアカウント JSON を 1 行文字列で)
 - `STATE_PATH` (任意。デフォルト `./state.json`)
 - `PORT` (任意。デフォルト `3000`)
@@ -37,11 +36,6 @@ JSON キー作成が組織ポリシーで禁止されている場合は、`GOOGL
 実行環境のサービスアカウントに Sheets へのアクセス権を付与してください（鍵レス運用）。
 
 ADC 利用時は、対象スプレッドシートを実行サービスアカウントに共有（編集者）してください。
-
-=======
-- `GOOGLE_SERVICE_ACCOUNT_JSON` (サービスアカウント JSON を 1 行文字列で)
-- `STATE_PATH` (任意。デフォルト `./state.json`)
-- `PORT` (任意。デフォルト `3000`)
 
 ## Google スプレッドシート
 
@@ -67,12 +61,16 @@ ADC 利用時は、対象スプレッドシートを実行サービスアカウ�
 
 ### Event Subscriptions
 
-Request URL: `https://<your-domain>/slack/events`
+1. Slack App 設定の **Event Subscriptions** を ON にする
+2. **Request URL** に `https://<your-domain>/slack/events` を設定する
+   - `<your-domain>` はこのアプリを公開しているURLです（例: Cloud Run の URL）
+   - URL 検証で `Verified` になる必要があります
+3. **Subscribe to bot events** に以下を追加する
+   - `reaction_added`
+   - `reaction_removed`
+   - `message.channels`
 
-Subscribe to bot events:
-- `reaction_added`
-- `reaction_removed`
-- `message.channels`
+この Bot は `/slack/events` でイベントを受信し、`message.channels` はスレッド投稿の `テーマ：...` 更新に利用します。
 
 ## ローカル実行時の設定例
 
