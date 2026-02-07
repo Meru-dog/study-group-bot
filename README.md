@@ -64,10 +64,6 @@ ADC 利用時は、対象スプレッドシートを実行サービスアカウ�
 1. Slack App 設定の **Event Subscriptions** を ON にする
 2. **Request URL** に `https://<your-domain>/slack/events` を設定する
    - `<your-domain>` は「公開された実URLのドメイン」を入れます。
-   - `study-bot` のような任意文字列はURLとして解決できないため、Slackで `not a proper link` になります。
-   - 例: Cloud Run の場合 `https://<service>-<hash>-an.a.run.app/slack/events`
-   - 例: ローカル確認時は `https://<ngrok-subdomain>.ngrok-free.app/slack/events` のようなHTTPS公開URLを使います。
-   - URL 検証で `Verified` になる必要があります（`/slack/events` が外部から到達可能であること）。
 3. **Subscribe to bot events** に以下を追加する
    - `reaction_added`
    - `reaction_removed`
@@ -90,39 +86,6 @@ python app.py
 
 未設定の必須環境変数がある場合、起動時に `Missing required environment variables: ...` エラーを表示します。
 
-## Cloud Run デプロイ時のよくあるエラー（403 storage.objects.get）
-
-`gcloud run deploy --source .` で次のようなエラーが出る場合があります。
-
-`<PROJECT_NUMBER>-compute@developer.gserviceaccount.com does not have storage.objects.get`
-
-これは Cloud Build/Cloud Run が参照する GCS バケットに対する権限不足です。次の順で付与してください。
-
-```bash
-PROJECT_ID='study-bot-486622'
-PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
-
-# ソース取得に必要（エラーに出た compute SA）
-gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" --role="roles/storage.objectViewer"
-
-# Cloud Build 実行に必要
-gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com" --role="roles/cloudbuild.builds.builder"
-
-# Cloud Run へのデプロイに必要
-gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com" --role="roles/run.admin"
-
-gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com" --role="roles/iam.serviceAccountUser"
-```
-
-権限付与後に再度 `gcloud run deploy ...` を実行し、最後に以下で URL を取得します。
-
-> `services describe` のサービス名は、`deploy` 時に指定した名前と**完全一致**させてください。
-> 例: `gcloud run deploy study-bot ...` で作成した場合は `services describe study-bot` を使います。
-
-```bash
-SERVICE_NAME='study-bot'  # deploy で使ったサービス名
-gcloud run services describe "$SERVICE_NAME" --region asia-northeast1 --format='value(status.url)'
-```
 
 ## 起動
 
