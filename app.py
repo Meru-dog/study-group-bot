@@ -6,6 +6,7 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from typing import Dict, List, Optional, Tuple
 
 import gspread
@@ -25,6 +26,7 @@ ATTENDANCE_EMOJIS = {"white_check_mark": "対面", "computer": "オンライン"
 SPEAKER_EMOJI = "microphone"
 TOPIC_PREFIX = "テーマ："
 DATE_FORMAT = "%Y/%m/%d"
+JST = ZoneInfo("Asia/Tokyo")
 MANUAL_DECLARATION_COMMAND = "参加宣言投稿"
 
 
@@ -85,6 +87,13 @@ class LocalState:
     def get_declaration_message(self, date_key: str) -> Optional[Dict[str, str]]:
         with self.lock:
             return self.state["declaration_messages"].get(date_key)
+
+    def get_date_by_declaration_message(self, channel: str, ts: str) -> Optional[str]:
+        with self.lock:
+            for date_key, msg in self.state["declaration_messages"].items():
+                if msg.get("channel") == channel and msg.get("ts") == ts:
+                    return date_key
+        return None
 
     def add_speaker_request(self, date_key: str, user_id: str, event_ts: str):
         with self.lock:
@@ -229,7 +238,7 @@ class StudyGroupBot:
         self._register_jobs()
 
     def _today(self) -> str:
-        return datetime.now().strftime(DATE_FORMAT)
+        return datetime.now(JST).strftime(DATE_FORMAT)
 
     def _register_jobs(self):
         self.scheduler.add_job(self.post_declaration_message, "cron", day_of_week="mon,wed,fri", hour=9, minute=0)
@@ -296,11 +305,14 @@ class StudyGroupBot:
         return bool(msg and msg["channel"] == channel and msg["ts"] == ts)
 
     def _handle_reaction(self, event: Dict, added: bool):
-        date_key = self._today()
         item = event.get("item", {})
         if item.get("type") != "message":
             return
-        if not self._is_target_message(date_key, item.get("channel"), item.get("ts")):
+
+        channel = item.get("channel")
+        ts = item.get("ts")
+        date_key = self.state.get_date_by_declaration_message(channel, ts)
+        if not date_key:
             return
 
         user_id = event["user"]
@@ -339,12 +351,12 @@ class StudyGroupBot:
     def _handle_thread_message(self, event: Dict):
         if event.get("subtype") is not None:
             return
-        date_key = self._today()
         thread_ts = event.get("thread_ts")
         if not thread_ts:
             return
-        declaration = self.state.get_declaration_message(date_key)
-        if not declaration or declaration["ts"] != thread_ts:
+
+        date_key = self.state.get_date_by_declaration_message(event.get("channel"), thread_ts)
+        if not date_key:
             return
 
         text = event.get("text", "")
