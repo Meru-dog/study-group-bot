@@ -63,8 +63,7 @@ ADC 利用時は、対象スプレッドシートを実行サービスアカウ�
 
 1. Slack App 設定の **Event Subscriptions** を ON にする
 2. **Request URL** に `https://<your-domain>/slack/events` を設定する
-   - `<your-domain>` はこのアプリを公開しているURLです（例: Cloud Run の URL）
-   - URL 検証で `Verified` になる必要があります
+   - `<your-domain>` は「公開された実URLのドメイン」を入れます。
 3. **Subscribe to bot events** に以下を追加する
    - `reaction_added`
    - `reaction_removed`
@@ -86,6 +85,7 @@ python app.py
 ```
 
 未設定の必須環境変数がある場合、起動時に `Missing required environment variables: ...` エラーを表示します。
+
 
 ## 起動
 

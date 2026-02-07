@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Tuple
 
 import gspread
 import google.auth
+from google.auth.exceptions import DefaultCredentialsError
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask, Response, request
 from slack_bolt import App
@@ -114,14 +115,21 @@ class SheetRepository:
     ]
 
     def __init__(self, settings: Settings):
-        if settings.google_service_account_json:
-            creds = json.loads(settings.google_service_account_json)
-            gc = gspread.service_account_from_dict(creds)
-            logger.info("Using GOOGLE_SERVICE_ACCOUNT_JSON for Google Sheets authentication")
-        else:
-            credentials, _ = google.auth.default(scopes=self.SHEETS_SCOPES)
-            gc = gspread.authorize(credentials)
-            logger.info("Using Application Default Credentials for Google Sheets authentication")
+        try:
+            if settings.google_service_account_json:
+                creds = json.loads(settings.google_service_account_json)
+                gc = gspread.service_account_from_dict(creds)
+                logger.info("Using GOOGLE_SERVICE_ACCOUNT_JSON for Google Sheets authentication")
+            else:
+                credentials, _ = google.auth.default(scopes=self.SHEETS_SCOPES)
+                gc = gspread.authorize(credentials)
+                logger.info("Using Application Default Credentials for Google Sheets authentication")
+        except DefaultCredentialsError as exc:
+            raise RuntimeError(
+                "Google credentials not found. Set GOOGLE_SERVICE_ACCOUNT_JSON on Render "
+                "or configure GOOGLE_APPLICATION_CREDENTIALS/ADC in the runtime environment."
+            ) from exc
+
         self.sheet = gc.open_by_key(settings.google_spreadsheet_id)
         try:
             self.ws = self.sheet.worksheet("出席管理")
@@ -338,7 +346,7 @@ def create_flask_app() -> Flask:
 
     try:
         settings = Settings.from_env()
-    except RuntimeError as exc:
+    except Exception as exc:
         error_message = str(exc)
         logger.error(error_message)
 
@@ -352,8 +360,22 @@ def create_flask_app() -> Flask:
 
         return app
 
-    bot = StudyGroupBot(settings)
-    bot.start()
+    try:
+        bot = StudyGroupBot(settings)
+        bot.start()
+    except Exception as exc:
+        error_message = str(exc)
+        logger.error(error_message)
+
+        @app.route("/slack/events", methods=["POST"])
+        def slack_events_unavailable_runtime() -> Response:
+            return Response(error_message, status=503)
+
+        @app.route("/healthz", methods=["GET"])
+        def healthz_unavailable_runtime() -> Response:
+            return Response(error_message, status=500)
+
+        return app
 
     @app.route("/slack/events", methods=["POST"])
     def slack_events() -> Response:
@@ -366,8 +388,11 @@ def create_flask_app() -> Flask:
     return app
 
 
-flask_app = create_flask_app()
+# Cloud Run / gunicorn の buildpack 既定エントリポイント（app:app）互換のため、
+# `app` という名前で Flask インスタンスを公開する。
+app = create_flask_app()
+flask_app = app
 
 
 if __name__ == "__main__":
-    flask_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "3000")))
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "3000")))
