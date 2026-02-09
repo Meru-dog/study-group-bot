@@ -8,12 +8,12 @@
 ## 1. 事前に準備するもの
 
 - Render などで公開済みのアプリ URL
-  - 例: `https://study-group-bot.onrender.com`
+  - 例:`https://<project-name>.onrender.com`
 - Slack ワークスペースの管理権限（アプリをインストールできる権限）
 - 本アプリの環境変数
   - `SLACK_BOT_TOKEN`（後で取得）
   - `SLACK_SIGNING_SECRET`（後で取得）
-  - `SLACK_CHANNEL_ID`（例: `C0ADLGNKW6N`）
+  - `SLACK_CHANNEL_ID`
 
 > 重要: `SLACK_CHANNEL_ID` は **チャンネル名ではなく ID** を設定してください。
 
@@ -24,7 +24,7 @@
 1. [Slack API: Your Apps](https://api.slack.com/apps) を開く
 2. `Create New App` を押す
 3. `From scratch` を選ぶ
-4. App Name を入力（例: `study-group-bot`）
+4. App Name を入力
 5. 対象ワークスペースを選択
 6. `Create App`
 
@@ -77,7 +77,6 @@
 2. `Enable Events` を ON
 3. `Request URL` に次を設定
    - `https://<公開URL>/slack/events`
-   - 例: `https://study-group-bot.onrender.com/slack/events`
 
 `Verified` になることを確認してください。
 
@@ -120,7 +119,7 @@ Bot が参加していないとイベントを受信できない場合があり�
 
 - `SLACK_BOT_TOKEN=xoxb-...`
 - `SLACK_SIGNING_SECRET=...`
-- `SLACK_CHANNEL_ID=C0ADLGNKW6N`（例）
+- `SLACK_CHANNEL_ID=...`
 - `MEET_URL=...`
 - `GOOGLE_SPREADSHEET_ID=...`
 
