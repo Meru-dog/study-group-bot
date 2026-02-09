@@ -119,7 +119,8 @@ class LocalState:
 
 
 class SheetRepository:
-    HEADERS = ["日付", "参加者", "対面/オンライン", "発表の有無", "発表テーマ"]
+    HEADERS = ["日付", "参加者", "対面/オンライン", "発表の有無", "発表テーマ", "SlackユーザーID"]
+    LEGACY_HEADERS = ["日付", "参加者", "対面/オンライン", "発表の有無", "発表テーマ"]
     SHEETS_SCOPES = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
@@ -150,43 +151,49 @@ class SheetRepository:
 
     def _ensure_headers(self):
         first = self.ws.row_values(1)
-        if first != self.HEADERS:
-            self.ws.clear()
+        if not first:
             self.ws.append_row(self.HEADERS)
+            return
+        if first == self.LEGACY_HEADERS:
+            self.ws.update("A1:F1", [self.HEADERS])
+            return
+        if first != self.HEADERS:
+            logger.warning("Unexpected sheet headers detected: %s", first)
 
-    def _find_row(self, date_key: str, participant: str) -> Optional[int]:
-        records = self.ws.get_all_records()
+    def _find_row(self, date_key: str, user_id: str) -> Optional[int]:
+        records = self.ws.get_all_records(expected_headers=self.HEADERS)
         for idx, rec in enumerate(records, start=2):
-            if rec["日付"] == date_key and rec["参加者"] == participant:
+            if rec.get("日付") == date_key and rec.get("SlackユーザーID") == user_id:
                 return idx
         return None
 
-    def upsert_attendance(self, date_key: str, participant: str, attendance: str):
+    def upsert_attendance(self, date_key: str, user_id: str, participant: str, attendance: str):
         self._ensure_headers()
-        row = self._find_row(date_key, participant)
+        row = self._find_row(date_key, user_id)
         if row:
-            self.ws.update(f"C{row}", [[attendance]])
+            self.ws.update(f"B{row}:C{row}", [[participant, attendance]])
+            self.ws.update(f"F{row}", [[user_id]])
         else:
-            self.ws.append_row([date_key, participant, attendance, "", ""])
+            self.ws.append_row([date_key, participant, attendance, "", "", user_id])
 
-    def update_speaker_flags(self, date_key: str, speaker_names: List[str]):
-        records = self.ws.get_all_records()
+    def update_speaker_flags(self, date_key: str, speaker_user_ids: List[str]):
+        records = self.ws.get_all_records(expected_headers=self.HEADERS)
         updates: List[Tuple[int, str]] = []
         for idx, rec in enumerate(records, start=2):
-            if rec["日付"] != date_key:
+            if rec.get("日付") != date_key:
                 continue
-            value = "○" if rec["参加者"] in speaker_names else ""
+            value = "○" if rec.get("SlackユーザーID") in speaker_user_ids else ""
             updates.append((idx, value))
         for idx, value in updates:
             self.ws.update(f"D{idx}", [[value]])
 
-    def update_topic(self, date_key: str, participant: str, topic: str):
-        row = self._find_row(date_key, participant)
+    def update_topic(self, date_key: str, user_id: str, topic: str):
+        row = self._find_row(date_key, user_id)
         if row:
             self.ws.update(f"E{row}", [[topic]])
 
     def get_day_records(self, date_key: str) -> List[Dict[str, str]]:
-        return [r for r in self.ws.get_all_records() if r["日付"] == date_key]
+        return [r for r in self.ws.get_all_records(expected_headers=self.HEADERS) if r.get("日付") == date_key]
 
 
 
@@ -194,26 +201,27 @@ class SheetRepository:
 class NoopSheetRepository:
     """Fallback repository used when Google credentials are unavailable."""
 
-    def upsert_attendance(self, date_key: str, participant: str, attendance: str):
+    def upsert_attendance(self, date_key: str, user_id: str, participant: str, attendance: str):
         logger.warning(
-            "Skipping upsert_attendance because Google Sheets is unavailable: %s, %s, %s",
+            "Skipping upsert_attendance because Google Sheets is unavailable: %s, %s, %s, %s",
             date_key,
+            user_id,
             participant,
             attendance,
         )
 
-    def update_speaker_flags(self, date_key: str, speaker_names: List[str]):
+    def update_speaker_flags(self, date_key: str, speaker_user_ids: List[str]):
         logger.warning(
             "Skipping update_speaker_flags because Google Sheets is unavailable: %s, %s",
             date_key,
-            speaker_names,
+            speaker_user_ids,
         )
 
-    def update_topic(self, date_key: str, participant: str, topic: str):
+    def update_topic(self, date_key: str, user_id: str, topic: str):
         logger.warning(
             "Skipping update_topic because Google Sheets is unavailable: %s, %s",
             date_key,
-            participant,
+            user_id,
         )
 
     def get_day_records(self, date_key: str) -> List[Dict[str, str]]:
@@ -242,11 +250,22 @@ class StudyGroupBot:
 
     def _register_jobs(self):
         self.scheduler.add_job(self.post_declaration_message, "cron", day_of_week="mon,wed,fri", hour=9, minute=0)
+        self.scheduler.add_job(self.ensure_daily_declaration_posted, "interval", minutes=5)
         self.scheduler.add_job(self.post_summary_message, "cron", day_of_week="mon,wed,fri", hour=15, minute=0)
         self.scheduler.add_job(self.post_start_message, "cron", day_of_week="mon,wed,fri", hour=17, minute=0)
 
     def start(self):
         self.scheduler.start()
+
+    def ensure_daily_declaration_posted(self):
+        now = datetime.now(JST)
+        if now.weekday() not in (0, 2, 4):
+            return
+        if now.hour < 9:
+            return
+        if self.state.get_declaration_message(self._today()):
+            return
+        self.post_declaration_message()
 
     def _display_name(self, user_id: str) -> str:
         if user_id in self.user_name_cache:
@@ -260,7 +279,7 @@ class StudyGroupBot:
     def post_declaration_message(self):
         date_key = self._today()
         text = (
-            "【本日 勉強会】参加宣言（締切15:00）\n"
+            "@channel 【本日 勉強会】参加宣言（締切15:00）\n"
             "本日 17:00–19:00 勉強会（渋谷＋Meet）です。\n"
             "15:00までにこの投稿にリアクションで参加宣言してください：\n"
             "✅ 対面（渋谷）\n"
@@ -320,7 +339,7 @@ class StudyGroupBot:
         reaction = event["reaction"]
 
         if reaction in ATTENDANCE_EMOJIS and added:
-            self.repo.upsert_attendance(date_key, user_name, ATTENDANCE_EMOJIS[reaction])
+            self.repo.upsert_attendance(date_key, user_id, user_name, ATTENDANCE_EMOJIS[reaction])
             self._refresh_speaker_flags(date_key)
 
         if reaction == SPEAKER_EMOJI:
@@ -332,8 +351,7 @@ class StudyGroupBot:
 
     def _refresh_speaker_flags(self, date_key: str):
         speaker_ids = self.state.get_speakers(date_key)
-        speaker_names = [self._display_name(uid) for uid in speaker_ids]
-        self.repo.update_speaker_flags(date_key, speaker_names)
+        self.repo.update_speaker_flags(date_key, speaker_ids)
 
     def _is_manual_command_channel(self, event_channel: Optional[str]) -> bool:
         return bool(event_channel and event_channel == self.target_channel_id)
@@ -370,8 +388,7 @@ class StudyGroupBot:
         topic = text[len(TOPIC_PREFIX) :].strip()
         if not topic:
             return
-        participant = self._display_name(event["user"])
-        self.repo.update_topic(date_key, participant, topic)
+        self.repo.update_topic(date_key, event["user"], topic)
 
     def post_summary_message(self):
         date_key = self._today()
