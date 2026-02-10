@@ -249,10 +249,10 @@ class StudyGroupBot:
         return datetime.now(JST).strftime(DATE_FORMAT)
 
     def _register_jobs(self):
-        self.scheduler.add_job(self.post_declaration_message, "cron", day_of_week="mon,wed,fri", hour=9, minute=0)
+        self.scheduler.add_job(self.post_declaration_message, "cron", day_of_week="mon,wed,fri", hour=9, minute=0, timezone=JST)
         self.scheduler.add_job(self.ensure_daily_declaration_posted, "interval", minutes=5)
-        self.scheduler.add_job(self.post_summary_message, "cron", day_of_week="mon,wed,fri", hour=15, minute=0)
-        self.scheduler.add_job(self.post_start_message, "cron", day_of_week="mon,wed,fri", hour=17, minute=0)
+        self.scheduler.add_job(self.post_summary_message, "cron", day_of_week="mon,wed,fri", hour=15, minute=0, timezone=JST)
+        self.scheduler.add_job(self.post_start_message, "cron", day_of_week="mon,wed,fri", hour=17, minute=0, timezone=JST)
 
     def start(self):
         self.scheduler.start()
@@ -279,7 +279,7 @@ class StudyGroupBot:
     def post_declaration_message(self):
         date_key = self._today()
         text = (
-            "@channel 【本日 勉強会】参加宣言（締切15:00）\n"
+            "<!channel> 【本日 勉強会】参加宣言（締切15:00）\n"
             "本日 17:00–19:00 勉強会（渋谷＋Meet）です。\n"
             "15:00までにこの投稿にリアクションで参加宣言してください：\n"
             "✅ 対面（渋谷）\n"
@@ -423,7 +423,7 @@ class StudyGroupBot:
             f"- {s['参加者']}（{s['対面/オンライン']}） テーマ: {s['発表テーマ'] or '未入力'}" for s in speakers
         ]
         text = (
-            "@channel 勉強会を開始します！\n"
+            "<!channel> 勉強会を開始します！\n"
             f"Meet: {self.settings.meet_url}\n"
             "本日の発表者:\n"
             f"{chr(10).join(speaker_lines) if speaker_lines else '- なし'}"
