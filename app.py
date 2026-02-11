@@ -83,6 +83,7 @@ class LocalState:
         with self.lock:
             self.state["declaration_messages"][date_key] = {"channel": channel, "ts": ts}
             self.save()
+            logger.info("Saved declaration message to state: date=%s, channel=%s, ts=%s", date_key, channel, ts)
 
     def get_declaration_message(self, date_key: str) -> Optional[Dict[str, str]]:
         with self.lock:
@@ -168,15 +169,19 @@ class SheetRepository:
         return None
 
     def upsert_attendance(self, date_key: str, user_id: str, participant: str, attendance: str):
+        """Insert or update attendance record in the spreadsheet."""
         self._ensure_headers()
         row = self._find_row(date_key, user_id)
         if row:
+            logger.info("Updating existing row %d for %s (%s): %s", row, participant, user_id, attendance)
             self.ws.update(f"B{row}:C{row}", [[participant, attendance]])
             self.ws.update(f"F{row}", [[user_id]])
         else:
+            logger.info("Appending new row for %s (%s): %s on %s", participant, user_id, attendance, date_key)
             self.ws.append_row([date_key, participant, attendance, "", "", user_id])
 
     def update_speaker_flags(self, date_key: str, speaker_user_ids: List[str]):
+        """Update speaker flags (○) in the spreadsheet for all participants on the given date."""
         records = self.ws.get_all_records(expected_headers=self.HEADERS)
         updates: List[Tuple[int, str]] = []
         for idx, rec in enumerate(records, start=2):
@@ -184,6 +189,8 @@ class SheetRepository:
                 continue
             value = "○" if rec.get("SlackユーザーID") in speaker_user_ids else ""
             updates.append((idx, value))
+
+        logger.info("Updating %d speaker flags for date %s (speakers: %s)", len(updates), date_key, speaker_user_ids)
         for idx, value in updates:
             self.ws.update(f"D{idx}", [[value]])
 
@@ -249,22 +256,36 @@ class StudyGroupBot:
         return datetime.now(JST).strftime(DATE_FORMAT)
 
     def _register_jobs(self):
-        self.scheduler.add_job(self.post_declaration_message, "cron", day_of_week="mon,wed,fri", hour=9, minute=0, timezone=JST)
-        self.scheduler.add_job(self.ensure_daily_declaration_posted, "interval", minutes=5)
-        self.scheduler.add_job(self.post_summary_message, "cron", day_of_week="mon,wed,fri", hour=15, minute=0, timezone=JST)
-        self.scheduler.add_job(self.post_start_message, "cron", day_of_week="mon,wed,fri", hour=17, minute=0, timezone=JST)
+        # Use string timezone consistently for APScheduler compatibility
+        tz = "Asia/Tokyo"
+        self.scheduler.add_job(self.post_declaration_message, "cron", day_of_week="mon,wed,fri", hour=9, minute=0, timezone=tz)
+        self.scheduler.add_job(self.ensure_daily_declaration_posted, "interval", minutes=5, timezone=tz)
+        self.scheduler.add_job(self.post_summary_message, "cron", day_of_week="mon,wed,fri", hour=15, minute=0, timezone=tz)
+        self.scheduler.add_job(self.post_start_message, "cron", day_of_week="mon,wed,fri", hour=17, minute=0, timezone=tz)
 
     def start(self):
         self.scheduler.start()
 
     def ensure_daily_declaration_posted(self):
+        """Fallback job to ensure declaration message is posted if cron job fails."""
         now = datetime.now(JST)
+        today = self._today()
+
+        # Only run on Monday, Wednesday, Friday
         if now.weekday() not in (0, 2, 4):
             return
+
+        # Only run after 9:00 AM
         if now.hour < 9:
             return
-        if self.state.get_declaration_message(self._today()):
+
+        # Check if message already posted for today
+        existing_msg = self.state.get_declaration_message(today)
+        if existing_msg:
+            logger.debug("Declaration message already posted for %s, skipping", today)
             return
+
+        logger.info("Declaration message not found for %s, posting now (fallback)", today)
         self.post_declaration_message()
 
     def _display_name(self, user_id: str) -> str:
@@ -277,7 +298,15 @@ class StudyGroupBot:
         return name
 
     def post_declaration_message(self):
+        """Post the daily participation declaration message."""
         date_key = self._today()
+
+        # Check if already posted to prevent duplicates
+        existing_msg = self.state.get_declaration_message(date_key)
+        if existing_msg:
+            logger.warning("Declaration message already exists for %s, skipping post", date_key)
+            return
+
         text = (
             "<!channel> 【本日 勉強会】参加宣言（締切15:00）\n"
             "本日 17:00–19:00 勉強会（渋谷＋Meet）です。\n"
@@ -289,9 +318,14 @@ class StudyGroupBot:
             "発表者はスレッドに `テーマ：〇〇` と返信してください（後で変更OK）\n"
             f"Meet：{self.settings.meet_url}"
         )
-        resp = self.app.client.chat_postMessage(channel=self.target_channel_id, text=text)
-        self.state.set_declaration_message(date_key, self.target_channel_id, resp["ts"])
-        logger.info("Declaration message posted for %s", date_key)
+
+        try:
+            resp = self.app.client.chat_postMessage(channel=self.target_channel_id, text=text)
+            self.state.set_declaration_message(date_key, self.target_channel_id, resp["ts"])
+            logger.info("Declaration message posted successfully for %s (ts: %s)", date_key, resp["ts"])
+        except Exception as exc:
+            logger.error("Failed to post declaration message for %s: %s", date_key, exc)
+            raise
 
     def _register_handlers(self):
         @self.app.event("reaction_added")
@@ -324,34 +358,59 @@ class StudyGroupBot:
         return bool(msg and msg["channel"] == channel and msg["ts"] == ts)
 
     def _handle_reaction(self, event: Dict, added: bool):
+        """Handle reaction added/removed events."""
         item = event.get("item", {})
         if item.get("type") != "message":
+            logger.debug("Ignoring non-message reaction")
             return
 
         channel = item.get("channel")
         ts = item.get("ts")
+
+        # Find which date this message corresponds to
         date_key = self.state.get_date_by_declaration_message(channel, ts)
         if not date_key:
+            logger.debug("Reaction on non-tracked message (channel: %s, ts: %s)", channel, ts)
             return
 
         user_id = event["user"]
         user_name = self._display_name(user_id)
         reaction = event["reaction"]
 
-        if reaction in ATTENDANCE_EMOJIS and added:
-            self.repo.upsert_attendance(date_key, user_id, user_name, ATTENDANCE_EMOJIS[reaction])
-            self._refresh_speaker_flags(date_key)
+        logger.info("Processing reaction '%s' %s by %s (%s) for date %s",
+                   reaction, "added" if added else "removed", user_name, user_id, date_key)
 
+        # Handle attendance reactions
+        if reaction in ATTENDANCE_EMOJIS and added:
+            try:
+                self.repo.upsert_attendance(date_key, user_id, user_name, ATTENDANCE_EMOJIS[reaction])
+                logger.info("Updated attendance for %s (%s) to %s", user_name, user_id, ATTENDANCE_EMOJIS[reaction])
+                self._refresh_speaker_flags(date_key)
+            except Exception as exc:
+                logger.error("Failed to update attendance for %s: %s", user_id, exc)
+
+        # Handle speaker reactions
         if reaction == SPEAKER_EMOJI:
-            if added:
-                self.state.add_speaker_request(date_key, user_id, event["event_ts"])
-            else:
-                self.state.remove_speaker_request(date_key, user_id)
-            self._refresh_speaker_flags(date_key)
+            try:
+                if added:
+                    self.state.add_speaker_request(date_key, user_id, event["event_ts"])
+                    logger.info("Added speaker request for %s (%s)", user_name, user_id)
+                else:
+                    self.state.remove_speaker_request(date_key, user_id)
+                    logger.info("Removed speaker request for %s (%s)", user_name, user_id)
+                self._refresh_speaker_flags(date_key)
+            except Exception as exc:
+                logger.error("Failed to update speaker request for %s: %s", user_id, exc)
 
     def _refresh_speaker_flags(self, date_key: str):
+        """Refresh speaker flags in the spreadsheet based on current speaker requests."""
         speaker_ids = self.state.get_speakers(date_key)
-        self.repo.update_speaker_flags(date_key, speaker_ids)
+        logger.info("Refreshing speaker flags for %s: %s", date_key, speaker_ids)
+        try:
+            self.repo.update_speaker_flags(date_key, speaker_ids)
+            logger.info("Speaker flags updated successfully for %s", date_key)
+        except Exception as exc:
+            logger.error("Failed to refresh speaker flags for %s: %s", date_key, exc)
 
     def _is_manual_command_channel(self, event_channel: Optional[str]) -> bool:
         return bool(event_channel and event_channel == self.target_channel_id)
