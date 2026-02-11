@@ -109,7 +109,7 @@
 
 ### 6-1. 設定値の確定
 
-- `SLACK_CHANNEL_ID` は実チャンネルID（例: `C0ADLGNKW6N`）を使用。
+- `SLACK_CHANNEL_ID` は実チャンネルIDを使用。
 
 ### 6-2. コード簡素化
 

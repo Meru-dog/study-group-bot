@@ -251,7 +251,7 @@ class StudyGroupBot:
     def post_declaration_message(self):
         date_key = self._today()
         text = (
-            "【本日 勉強会】参加宣言（締切15:00）\n"
+            "<!channel> 【本日 勉強会】参加宣言（締切15:00）\n"
             "本日 17:00–19:00 勉強会（渋谷＋Meet）です。\n"
             "15:00までにこの投稿にリアクションで参加宣言してください：\n"
             "✅ 対面（渋谷）\n"
@@ -394,7 +394,7 @@ class StudyGroupBot:
             f"- {s['参加者']}（{s['対面/オンライン']}） テーマ: {s['発表テーマ'] or '未入力'}" for s in speakers
         ]
         text = (
-            "@channel 勉強会を開始します！\n"
+            "<!channel> 勉強会を開始します！\n"
             f"Meet: {self.settings.meet_url}\n"
             "本日の発表者:\n"
             f"{chr(10).join(speaker_lines) if speaker_lines else '- なし'}"
