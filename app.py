@@ -154,53 +154,78 @@ class SheetRepository:
         first = self.ws.row_values(1)
         if not first:
             self.ws.append_row(self.HEADERS)
+            logger.info("Added headers to empty sheet")
             return
         if first == self.LEGACY_HEADERS:
             self.ws.update("A1:F1", [self.HEADERS])
+            logger.info("Updated legacy headers to current format")
             return
         if first != self.HEADERS:
-            logger.warning("Unexpected sheet headers detected: %s", first)
+            logger.warning("Unexpected sheet headers detected: %s. Updating to expected headers: %s", first, self.HEADERS)
+            self.ws.update("A1:F1", [self.HEADERS])
 
     def _find_row(self, date_key: str, user_id: str) -> Optional[int]:
-        records = self.ws.get_all_records(expected_headers=self.HEADERS)
-        for idx, rec in enumerate(records, start=2):
-            if rec.get("日付") == date_key and rec.get("SlackユーザーID") == user_id:
-                return idx
+        try:
+            records = self.ws.get_all_records(expected_headers=self.HEADERS)
+            for idx, rec in enumerate(records, start=2):
+                if rec.get("日付") == date_key and rec.get("SlackユーザーID") == user_id:
+                    return idx
+        except Exception as exc:
+            logger.error("Failed to find row for date=%s, user_id=%s: %s", date_key, user_id, exc)
         return None
 
     def upsert_attendance(self, date_key: str, user_id: str, participant: str, attendance: str):
         """Insert or update attendance record in the spreadsheet."""
-        self._ensure_headers()
-        row = self._find_row(date_key, user_id)
-        if row:
-            logger.info("Updating existing row %d for %s (%s): %s", row, participant, user_id, attendance)
-            self.ws.update(f"B{row}:C{row}", [[participant, attendance]])
-            self.ws.update(f"F{row}", [[user_id]])
-        else:
-            logger.info("Appending new row for %s (%s): %s on %s", participant, user_id, attendance, date_key)
-            self.ws.append_row([date_key, participant, attendance, "", "", user_id])
+        try:
+            self._ensure_headers()
+            row = self._find_row(date_key, user_id)
+            if row:
+                logger.info("Updating existing row %d for %s (%s): %s", row, participant, user_id, attendance)
+                self.ws.update(f"B{row}:C{row}", [[participant, attendance]])
+                self.ws.update(f"F{row}", [[user_id]])
+            else:
+                logger.info("Appending new row for %s (%s): %s on %s", participant, user_id, attendance, date_key)
+                self.ws.append_row([date_key, participant, attendance, "", "", user_id])
+        except Exception as exc:
+            logger.error("Failed to upsert attendance for %s (%s) on %s: %s", participant, user_id, date_key, exc)
+            raise
 
     def update_speaker_flags(self, date_key: str, speaker_user_ids: List[str]):
         """Update speaker flags (○) in the spreadsheet for all participants on the given date."""
-        records = self.ws.get_all_records(expected_headers=self.HEADERS)
-        updates: List[Tuple[int, str]] = []
-        for idx, rec in enumerate(records, start=2):
-            if rec.get("日付") != date_key:
-                continue
-            value = "○" if rec.get("SlackユーザーID") in speaker_user_ids else ""
-            updates.append((idx, value))
+        try:
+            records = self.ws.get_all_records(expected_headers=self.HEADERS)
+            updates: List[Tuple[int, str]] = []
+            for idx, rec in enumerate(records, start=2):
+                if rec.get("日付") != date_key:
+                    continue
+                value = "○" if rec.get("SlackユーザーID") in speaker_user_ids else ""
+                updates.append((idx, value))
 
-        logger.info("Updating %d speaker flags for date %s (speakers: %s)", len(updates), date_key, speaker_user_ids)
-        for idx, value in updates:
-            self.ws.update(f"D{idx}", [[value]])
+            logger.info("Updating %d speaker flags for date %s (speakers: %s)", len(updates), date_key, speaker_user_ids)
+            for idx, value in updates:
+                self.ws.update(f"D{idx}", [[value]])
+        except Exception as exc:
+            logger.error("Failed to update speaker flags for date %s: %s", date_key, exc)
+            raise
 
     def update_topic(self, date_key: str, user_id: str, topic: str):
-        row = self._find_row(date_key, user_id)
-        if row:
-            self.ws.update(f"E{row}", [[topic]])
+        try:
+            row = self._find_row(date_key, user_id)
+            if row:
+                self.ws.update(f"E{row}", [[topic]])
+                logger.info("Updated topic for user %s on %s: %s", user_id, date_key, topic)
+            else:
+                logger.warning("Could not find row for user %s on %s to update topic", user_id, date_key)
+        except Exception as exc:
+            logger.error("Failed to update topic for user %s on %s: %s", user_id, date_key, exc)
 
     def get_day_records(self, date_key: str) -> List[Dict[str, str]]:
-        return [r for r in self.ws.get_all_records(expected_headers=self.HEADERS) if r.get("日付") == date_key]
+        try:
+            records = self.ws.get_all_records(expected_headers=self.HEADERS)
+            return [r for r in records if r.get("日付") == date_key]
+        except Exception as exc:
+            logger.error("Failed to get day records for date %s: %s", date_key, exc)
+            return []
 
 
 
@@ -248,6 +273,7 @@ class StudyGroupBot:
             self.repo = NoopSheetRepository()
         self.user_name_cache: Dict[str, str] = {}
         self.target_channel_id = settings.slack_channel_id.strip()
+        self._post_lock = threading.Lock()  # Prevents concurrent duplicate posts
         self._register_handlers()
         self.scheduler = BackgroundScheduler(timezone="Asia/Tokyo")
         self._register_jobs()
@@ -256,10 +282,12 @@ class StudyGroupBot:
         return datetime.now(JST).strftime(DATE_FORMAT)
 
     def _register_jobs(self):
-        # Use string timezone consistently for APScheduler compatibility
         tz = "Asia/Tokyo"
+        # Use cron triggers for all scheduled messages.
+        # ensure_daily_declaration_posted runs every minute as a reliable fallback
+        # in case the 9:00 cron job is missed (e.g. service restart, cold start).
         self.scheduler.add_job(self.post_declaration_message, "cron", day_of_week="mon,wed,fri", hour=9, minute=0, timezone=tz)
-        self.scheduler.add_job(self.ensure_daily_declaration_posted, "interval", minutes=5, timezone=tz)
+        self.scheduler.add_job(self.ensure_daily_declaration_posted, "cron", minute="*/1", timezone=tz)
         self.scheduler.add_job(self.post_summary_message, "cron", day_of_week="mon,wed,fri", hour=15, minute=0, timezone=tz)
         self.scheduler.add_job(self.post_start_message, "cron", day_of_week="mon,wed,fri", hour=17, minute=0, timezone=tz)
 
@@ -298,34 +326,35 @@ class StudyGroupBot:
         return name
 
     def post_declaration_message(self):
-        """Post the daily participation declaration message."""
+        """Post the daily participation declaration message. Thread-safe: only posts once per day."""
         date_key = self._today()
 
-        # Check if already posted to prevent duplicates
-        existing_msg = self.state.get_declaration_message(date_key)
-        if existing_msg:
-            logger.warning("Declaration message already exists for %s, skipping post", date_key)
-            return
+        # Use a lock so that if multiple threads arrive here simultaneously (e.g. scheduler +
+        # manual command), only the first one actually posts.
+        with self._post_lock:
+            if self.state.get_declaration_message(date_key):
+                logger.warning("Declaration message already exists for %s, skipping post", date_key)
+                return
 
-        text = (
-            "<!channel> 【本日 勉強会】参加宣言（締切15:00）\n"
-            "本日 17:00–19:00 勉強会（渋谷＋Meet）です。\n"
-            "15:00までにこの投稿にリアクションで参加宣言してください：\n"
-            "✅ 対面（渋谷）\n"
-            "💻 オンライン（Meet）\n"
-            "💤 欠席\n"
-            "発表したい人は 🎤 を追加で押してください（先着2名／取り消しは🎤を外す）\n"
-            "発表者はスレッドに `テーマ：〇〇` と返信してください（後で変更OK）\n"
-            f"Meet：{self.settings.meet_url}"
-        )
+            text = (
+                "<!channel> 【本日 勉強会】参加宣言（締切15:00）\n"
+                "本日 17:00–19:00 勉強会（渋谷＋Meet）です。\n"
+                "15:00までにこの投稿にリアクションで参加宣言してください：\n"
+                "✅ 対面（渋谷）\n"
+                "💻 オンライン（Meet）\n"
+                "💤 欠席\n"
+                "発表したい人は 🎤 を追加で押してください（先着2名／取り消しは🎤を外す）\n"
+                "発表者はスレッドに `テーマ：〇〇` と返信してください（後で変更OK）\n"
+                f"Meet：{self.settings.meet_url}"
+            )
 
-        try:
-            resp = self.app.client.chat_postMessage(channel=self.target_channel_id, text=text)
-            self.state.set_declaration_message(date_key, self.target_channel_id, resp["ts"])
-            logger.info("Declaration message posted successfully for %s (ts: %s)", date_key, resp["ts"])
-        except Exception as exc:
-            logger.error("Failed to post declaration message for %s: %s", date_key, exc)
-            raise
+            try:
+                resp = self.app.client.chat_postMessage(channel=self.target_channel_id, text=text)
+                self.state.set_declaration_message(date_key, self.target_channel_id, resp["ts"])
+                logger.info("Declaration message posted successfully for %s (ts: %s)", date_key, resp["ts"])
+            except Exception as exc:
+                logger.error("Failed to post declaration message for %s: %s", date_key, exc)
+                raise
 
     def _register_handlers(self):
         @self.app.event("reaction_added")
@@ -340,10 +369,11 @@ class StudyGroupBot:
 
         @self.app.event("message")
         def on_message(event, logger):
-            self._handle_manual_command(event)
+            # NOTE: do NOT call _handle_manual_command here.
+            # @app.message(pattern) below already handles "参加宣言投稿".
+            # Calling both would post the declaration twice.
             self._handle_thread_message(event)
             logger.info("processed message event")
-
 
         @self.app.message(re.compile(r"^\s*参加宣言投稿\s*$"))
         def on_manual_declaration_message(message, say, logger):
