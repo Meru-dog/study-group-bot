@@ -6,7 +6,6 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from zoneinfo import ZoneInfo
 from typing import Dict, List, Optional, Tuple
 
 import gspread
@@ -26,7 +25,6 @@ ATTENDANCE_EMOJIS = {"white_check_mark": "対面", "computer": "オンライン"
 SPEAKER_EMOJI = "microphone"
 TOPIC_PREFIX = "テーマ："
 DATE_FORMAT = "%Y/%m/%d"
-JST = ZoneInfo("Asia/Tokyo")
 MANUAL_DECLARATION_COMMAND = "参加宣言投稿"
 
 
@@ -89,13 +87,6 @@ class LocalState:
         with self.lock:
             return self.state["declaration_messages"].get(date_key)
 
-    def get_date_by_declaration_message(self, channel: str, ts: str) -> Optional[str]:
-        with self.lock:
-            for date_key, msg in self.state["declaration_messages"].items():
-                if msg.get("channel") == channel and msg.get("ts") == ts:
-                    return date_key
-        return None
-
     def add_speaker_request(self, date_key: str, user_id: str, event_ts: str):
         with self.lock:
             day = self.state["speaker_requests"].setdefault(date_key, {})
@@ -120,8 +111,7 @@ class LocalState:
 
 
 class SheetRepository:
-    HEADERS = ["日付", "参加者", "対面/オンライン", "発表の有無", "発表テーマ", "SlackユーザーID"]
-    LEGACY_HEADERS = ["日付", "参加者", "対面/オンライン", "発表の有無", "発表テーマ"]
+    HEADERS = ["日付", "参加者", "対面/オンライン", "発表の有無", "発表テーマ"]
     SHEETS_SCOPES = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
@@ -152,80 +142,43 @@ class SheetRepository:
 
     def _ensure_headers(self):
         first = self.ws.row_values(1)
-        if not first:
-            self.ws.append_row(self.HEADERS)
-            logger.info("Added headers to empty sheet")
-            return
-        if first == self.LEGACY_HEADERS:
-            self.ws.update("A1:F1", [self.HEADERS])
-            logger.info("Updated legacy headers to current format")
-            return
         if first != self.HEADERS:
-            logger.warning("Unexpected sheet headers detected: %s. Updating to expected headers: %s", first, self.HEADERS)
-            self.ws.update("A1:F1", [self.HEADERS])
+            self.ws.clear()
+            self.ws.append_row(self.HEADERS)
 
-    def _find_row(self, date_key: str, user_id: str) -> Optional[int]:
-        try:
-            records = self.ws.get_all_records(expected_headers=self.HEADERS)
-            for idx, rec in enumerate(records, start=2):
-                if rec.get("日付") == date_key and rec.get("SlackユーザーID") == user_id:
-                    return idx
-        except Exception as exc:
-            logger.error("Failed to find row for date=%s, user_id=%s: %s", date_key, user_id, exc)
+    def _find_row(self, date_key: str, participant: str) -> Optional[int]:
+        records = self.ws.get_all_records()
+        for idx, rec in enumerate(records, start=2):
+            if rec["日付"] == date_key and rec["参加者"] == participant:
+                return idx
         return None
 
-    def upsert_attendance(self, date_key: str, user_id: str, participant: str, attendance: str):
-        """Insert or update attendance record in the spreadsheet."""
-        try:
-            self._ensure_headers()
-            row = self._find_row(date_key, user_id)
-            if row:
-                logger.info("Updating existing row %d for %s (%s): %s", row, participant, user_id, attendance)
-                self.ws.update(f"B{row}:C{row}", [[participant, attendance]])
-                self.ws.update(f"F{row}", [[user_id]])
-            else:
-                logger.info("Appending new row for %s (%s): %s on %s", participant, user_id, attendance, date_key)
-                self.ws.append_row([date_key, participant, attendance, "", "", user_id])
-        except Exception as exc:
-            logger.error("Failed to upsert attendance for %s (%s) on %s: %s", participant, user_id, date_key, exc)
-            raise
+    def upsert_attendance(self, date_key: str, participant: str, attendance: str):
+        self._ensure_headers()
+        row = self._find_row(date_key, participant)
+        if row:
+            self.ws.update(f"C{row}", [[attendance]])
+        else:
+            self.ws.append_row([date_key, participant, attendance, "", ""])
 
-    def update_speaker_flags(self, date_key: str, speaker_user_ids: List[str]):
-        """Update speaker flags (○) in the spreadsheet for all participants on the given date."""
-        try:
-            records = self.ws.get_all_records(expected_headers=self.HEADERS)
-            updates: List[Tuple[int, str]] = []
-            for idx, rec in enumerate(records, start=2):
-                if rec.get("日付") != date_key:
-                    continue
-                value = "○" if rec.get("SlackユーザーID") in speaker_user_ids else ""
-                updates.append((idx, value))
+    def update_speaker_flags(self, date_key: str, speaker_names: List[str]):
+        records = self.ws.get_all_records()
+        updates: List[Tuple[int, str]] = []
+        for idx, rec in enumerate(records, start=2):
+            if rec["日付"] != date_key:
+                continue
+            value = "○" if rec["参加者"] in speaker_names else ""
+            updates.append((idx, value))
+        for idx, value in updates:
+            self.ws.update(f"D{idx}", [[value]])
 
-            logger.info("Updating %d speaker flags for date %s (speakers: %s)", len(updates), date_key, speaker_user_ids)
-            for idx, value in updates:
-                self.ws.update(f"D{idx}", [[value]])
-        except Exception as exc:
-            logger.error("Failed to update speaker flags for date %s: %s", date_key, exc)
-            raise
-
-    def update_topic(self, date_key: str, user_id: str, topic: str):
-        try:
-            row = self._find_row(date_key, user_id)
-            if row:
-                self.ws.update(f"E{row}", [[topic]])
-                logger.info("Updated topic for user %s on %s: %s", user_id, date_key, topic)
-            else:
-                logger.warning("Could not find row for user %s on %s to update topic", user_id, date_key)
-        except Exception as exc:
-            logger.error("Failed to update topic for user %s on %s: %s", user_id, date_key, exc)
+    def update_topic(self, date_key: str, participant: str, topic: str):
+        row = self._find_row(date_key, participant)
+        if row:
+            self.ws.update(f"E{row}", [[topic]])
 
     def get_day_records(self, date_key: str) -> List[Dict[str, str]]:
-        try:
-            records = self.ws.get_all_records(expected_headers=self.HEADERS)
-            return [r for r in records if r.get("日付") == date_key]
-        except Exception as exc:
-            logger.error("Failed to get day records for date %s: %s", date_key, exc)
-            return []
+        return [r for r in self.ws.get_all_records() if r["日付"] == date_key]
 
 
 
@@ -233,27 +186,26 @@ class SheetRepository:
 class NoopSheetRepository:
     """Fallback repository used when Google credentials are unavailable."""
 
-    def upsert_attendance(self, date_key: str, user_id: str, participant: str, attendance: str):
+    def upsert_attendance(self, date_key: str, participant: str, attendance: str):
         logger.warning(
-            "Skipping upsert_attendance because Google Sheets is unavailable: %s, %s, %s, %s",
+            "Skipping upsert_attendance because Google Sheets is unavailable: %s, %s, %s",
             date_key,
-            user_id,
             participant,
             attendance,
         )
 
-    def update_speaker_flags(self, date_key: str, speaker_user_ids: List[str]):
+    def update_speaker_flags(self, date_key: str, speaker_names: List[str]):
         logger.warning(
             "Skipping update_speaker_flags because Google Sheets is unavailable: %s, %s",
             date_key,
-            speaker_user_ids,
+            speaker_names,
         )
 
-    def update_topic(self, date_key: str, user_id: str, topic: str):
+    def update_topic(self, date_key: str, participant: str, topic: str):
         logger.warning(
             "Skipping update_topic because Google Sheets is unavailable: %s, %s",
             date_key,
-            user_id,
+            participant,
         )
 
     def get_day_records(self, date_key: str) -> List[Dict[str, str]]:
@@ -279,42 +231,15 @@ class StudyGroupBot:
         self._register_jobs()
 
     def _today(self) -> str:
-        return datetime.now(JST).strftime(DATE_FORMAT)
+        return datetime.now().strftime(DATE_FORMAT)
 
     def _register_jobs(self):
-        tz = "Asia/Tokyo"
-        # Use cron triggers for all scheduled messages.
-        # ensure_daily_declaration_posted runs every minute as a reliable fallback
-        # in case the 9:00 cron job is missed (e.g. service restart, cold start).
-        self.scheduler.add_job(self.post_declaration_message, "cron", day_of_week="mon,wed,fri", hour=9, minute=0, timezone=tz)
-        self.scheduler.add_job(self.ensure_daily_declaration_posted, "cron", minute="*/1", timezone=tz)
-        self.scheduler.add_job(self.post_summary_message, "cron", day_of_week="mon,wed,fri", hour=15, minute=0, timezone=tz)
-        self.scheduler.add_job(self.post_start_message, "cron", day_of_week="mon,wed,fri", hour=17, minute=0, timezone=tz)
+        self.scheduler.add_job(self.post_declaration_message, "cron", day_of_week="mon,wed,fri", hour=9, minute=0)
+        self.scheduler.add_job(self.post_summary_message, "cron", day_of_week="mon,wed,fri", hour=15, minute=0)
+        self.scheduler.add_job(self.post_start_message, "cron", day_of_week="mon,wed,fri", hour=17, minute=0)
 
     def start(self):
         self.scheduler.start()
-
-    def ensure_daily_declaration_posted(self):
-        """Fallback job to ensure declaration message is posted if cron job fails."""
-        now = datetime.now(JST)
-        today = self._today()
-
-        # Only run on Monday, Wednesday, Friday
-        if now.weekday() not in (0, 2, 4):
-            return
-
-        # Only run after 9:00 AM
-        if now.hour < 9:
-            return
-
-        # Check if message already posted for today
-        existing_msg = self.state.get_declaration_message(today)
-        if existing_msg:
-            logger.debug("Declaration message already posted for %s, skipping", today)
-            return
-
-        logger.info("Declaration message not found for %s, posting now (fallback)", today)
-        self.post_declaration_message()
 
     def _display_name(self, user_id: str) -> str:
         if user_id in self.user_name_cache:
@@ -388,27 +313,21 @@ class StudyGroupBot:
         return bool(msg and msg["channel"] == channel and msg["ts"] == ts)
 
     def _handle_reaction(self, event: Dict, added: bool):
-        """Handle reaction added/removed events."""
+        date_key = self._today()
         item = event.get("item", {})
         if item.get("type") != "message":
             logger.debug("Ignoring non-message reaction")
             return
-
-        channel = item.get("channel")
-        ts = item.get("ts")
-
-        # Find which date this message corresponds to
-        date_key = self.state.get_date_by_declaration_message(channel, ts)
-        if not date_key:
-            logger.debug("Reaction on non-tracked message (channel: %s, ts: %s)", channel, ts)
+        if not self._is_target_message(date_key, item.get("channel"), item.get("ts")):
             return
 
         user_id = event["user"]
         user_name = self._display_name(user_id)
         reaction = event["reaction"]
 
-        logger.info("Processing reaction '%s' %s by %s (%s) for date %s",
-                   reaction, "added" if added else "removed", user_name, user_id, date_key)
+        if reaction in ATTENDANCE_EMOJIS and added:
+            self.repo.upsert_attendance(date_key, user_name, ATTENDANCE_EMOJIS[reaction])
+            self._refresh_speaker_flags(date_key)
 
         # Handle attendance reactions
         if reaction in ATTENDANCE_EMOJIS and added:
@@ -435,12 +354,8 @@ class StudyGroupBot:
     def _refresh_speaker_flags(self, date_key: str):
         """Refresh speaker flags in the spreadsheet based on current speaker requests."""
         speaker_ids = self.state.get_speakers(date_key)
-        logger.info("Refreshing speaker flags for %s: %s", date_key, speaker_ids)
-        try:
-            self.repo.update_speaker_flags(date_key, speaker_ids)
-            logger.info("Speaker flags updated successfully for %s", date_key)
-        except Exception as exc:
-            logger.error("Failed to refresh speaker flags for %s: %s", date_key, exc)
+        speaker_names = [self._display_name(uid) for uid in speaker_ids]
+        self.repo.update_speaker_flags(date_key, speaker_names)
 
     def _is_manual_command_channel(self, event_channel: Optional[str]) -> bool:
         return bool(event_channel and event_channel == self.target_channel_id)
@@ -458,12 +373,12 @@ class StudyGroupBot:
     def _handle_thread_message(self, event: Dict):
         if event.get("subtype") is not None:
             return
+        date_key = self._today()
         thread_ts = event.get("thread_ts")
         if not thread_ts:
             return
-
-        date_key = self.state.get_date_by_declaration_message(event.get("channel"), thread_ts)
-        if not date_key:
+        declaration = self.state.get_declaration_message(date_key)
+        if not declaration or declaration["ts"] != thread_ts:
             return
 
         text = event.get("text", "")
@@ -477,7 +392,8 @@ class StudyGroupBot:
         topic = text[len(TOPIC_PREFIX) :].strip()
         if not topic:
             return
-        self.repo.update_topic(date_key, event["user"], topic)
+        participant = self._display_name(event["user"])
+        self.repo.update_topic(date_key, participant, topic)
 
     def post_summary_message(self):
         date_key = self._today()
