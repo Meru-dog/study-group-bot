@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import gspread
 import google.auth
@@ -25,6 +26,7 @@ ATTENDANCE_EMOJIS = {"white_check_mark": "対面", "computer": "オンライン"
 SPEAKER_EMOJI = "microphone"
 TOPIC_PREFIX = "テーマ："
 DATE_FORMAT = "%Y/%m/%d"
+JST = ZoneInfo("Asia/Tokyo")
 MANUAL_DECLARATION_COMMAND = "参加宣言投稿"
 
 
@@ -224,20 +226,36 @@ class StudyGroupBot:
             self.repo = NoopSheetRepository()
         self.user_name_cache: Dict[str, str] = {}
         self.target_channel_id = settings.slack_channel_id.strip()
+        self._post_lock = threading.Lock()
         self._register_handlers()
         self.scheduler = BackgroundScheduler(timezone="Asia/Tokyo")
         self._register_jobs()
 
     def _today(self) -> str:
-        return datetime.now().strftime(DATE_FORMAT)
+        return datetime.now(JST).strftime(DATE_FORMAT)
 
     def _register_jobs(self):
-        self.scheduler.add_job(self.post_declaration_message, "cron", day_of_week="mon,wed,fri", hour=9, minute=0)
-        self.scheduler.add_job(self.post_summary_message, "cron", day_of_week="mon,wed,fri", hour=15, minute=0)
-        self.scheduler.add_job(self.post_start_message, "cron", day_of_week="mon,wed,fri", hour=17, minute=0)
+        tz = "Asia/Tokyo"
+        self.scheduler.add_job(self.post_declaration_message, "cron", day_of_week="mon,wed,fri", hour=9, minute=0, timezone=tz)
+        # Fallback: runs every minute and posts if the 9:00 cron was missed (e.g. restart)
+        self.scheduler.add_job(self.ensure_daily_declaration_posted, "cron", minute="*/1", timezone=tz)
+        self.scheduler.add_job(self.post_summary_message, "cron", day_of_week="mon,wed,fri", hour=15, minute=0, timezone=tz)
+        self.scheduler.add_job(self.post_start_message, "cron", day_of_week="mon,wed,fri", hour=17, minute=0, timezone=tz)
 
     def start(self):
         self.scheduler.start()
+
+    def ensure_daily_declaration_posted(self):
+        """Fallback: posts the declaration if the 9:00 AM cron was missed."""
+        now = datetime.now(JST)
+        if now.weekday() not in (0, 2, 4):  # Mon, Wed, Fri only
+            return
+        if now.hour < 9:
+            return
+        if self.state.get_declaration_message(self._today()):
+            return
+        logger.info("Fallback: declaration message not found for %s, posting now", self._today())
+        self.post_declaration_message()
 
     def _display_name(self, user_id: str) -> str:
         if user_id in self.user_name_cache:
@@ -249,21 +267,26 @@ class StudyGroupBot:
         return name
 
     def post_declaration_message(self):
+        """Post today's declaration message. Thread-safe: guaranteed to post at most once per day."""
         date_key = self._today()
-        text = (
-            "<!channel> 【本日 勉強会】参加宣言（締切15:00）\n"
-            "本日 17:00–19:00 勉強会（渋谷＋Meet）です。\n"
-            "15:00までにこの投稿にリアクションで参加宣言してください：\n"
-            "✅ 対面（渋谷）\n"
-            "💻 オンライン（Meet）\n"
-            "💤 欠席\n"
-            "発表したい人は 🎤 を追加で押してください（先着2名／取り消しは🎤を外す）\n"
-            "発表者はスレッドに `テーマ：〇〇` と返信してください（後で変更OK）\n"
-            f"Meet：{self.settings.meet_url}"
-        )
-        resp = self.app.client.chat_postMessage(channel=self.target_channel_id, text=text)
-        self.state.set_declaration_message(date_key, self.target_channel_id, resp["ts"])
-        logger.info("Declaration message posted for %s", date_key)
+        with self._post_lock:
+            if self.state.get_declaration_message(date_key):
+                logger.info("Declaration message already posted for %s, skipping", date_key)
+                return
+            text = (
+                "<!channel> 【本日 勉強会】参加宣言（締切15:00）\n"
+                "本日 17:00–19:00 勉強会（渋谷＋Meet）です。\n"
+                "15:00までにこの投稿にリアクションで参加宣言してください：\n"
+                "✅ 対面（渋谷）\n"
+                "💻 オンライン（Meet）\n"
+                "💤 欠席\n"
+                "発表したい人は 🎤 を追加で押してください（先着2名／取り消しは🎤を外す）\n"
+                "発表者はスレッドに `テーマ：〇〇` と返信してください（後で変更OK）\n"
+                f"Meet：{self.settings.meet_url}"
+            )
+            resp = self.app.client.chat_postMessage(channel=self.target_channel_id, text=text)
+            self.state.set_declaration_message(date_key, self.target_channel_id, resp["ts"])
+            logger.info("Declaration message posted for %s", date_key)
 
     def _register_handlers(self):
         @self.app.event("reaction_added")
@@ -278,10 +301,10 @@ class StudyGroupBot:
 
         @self.app.event("message")
         def on_message(event, logger):
-            self._handle_manual_command(event)
+            # Do NOT call _handle_manual_command here — @app.message below already
+            # handles "参加宣言投稿". Calling both would trigger two concurrent posts.
             self._handle_thread_message(event)
             logger.info("processed message event")
-
 
         @self.app.message(re.compile(r"^\s*参加宣言投稿\s*$"))
         def on_manual_declaration_message(message, say, logger):
